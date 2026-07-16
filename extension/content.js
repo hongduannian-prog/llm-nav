@@ -7,6 +7,10 @@ const SITE_CONFIG = {
     userMessage: '[data-message-author-role="user"]',
     scrollContainer: 'main'
   },
+  'chat.openai.com': {
+    userMessage: '[data-message-author-role="user"]',
+    scrollContainer: 'main'
+  },
   'gemini.google.com': {
     userMessage: 'user-query',
     scrollContainer: '.conversation-container'
@@ -25,10 +29,12 @@ const config = configEntry[1];
 let activeItem = null;
 let observer = null;
 let currentUrl = location.href;
+let rebuildTimer = null;
+let scrollRafPending = false;
+let scrollLockUntil = 0; // 点击跳转后短暂屏蔽 scroll 高亮更新
 
 function buildSidebar() {
   const messages = document.querySelectorAll(config.userMessage);
-  console.log('[nav] buildSidebar, messages:', messages.length);
   if (messages.length === 0) return;
 
   let sidebar = document.getElementById('claude-nav-sidebar');
@@ -53,26 +59,44 @@ function buildSidebar() {
     document.body.appendChild(sidebar);
   }
 
+  // 保留当前高亮位置，重建后恢复
+  const prevActiveIndex = activeItem
+    ? Array.prototype.indexOf.call(
+        document.querySelectorAll('.claude-nav-item'), activeItem)
+    : -1;
+
   const list = document.getElementById('claude-nav-list');
   list.innerHTML = '';
   activeItem = null;
 
   messages.forEach((el, i) => {
-    const text = el.innerText.trim().slice(0, 40) || `information ${i + 1}`;
+    const text = el.innerText.trim().slice(0, 40) || `消息 ${i + 1}`;
     const item = document.createElement('div');
     item.className = 'claude-nav-item';
     item.textContent = `${i + 1}. ${text}`;
     item.onclick = () => {
       el.scrollIntoView({ behavior: 'smooth' });
+      scrollLockUntil = Date.now() + 800; // smooth scroll 期间不让高亮乱跳
       if (activeItem) activeItem.classList.remove('active');
       item.classList.add('active');
       activeItem = item;
     };
+    if (i === prevActiveIndex) {
+      item.classList.add('active');
+      activeItem = item;
+    }
     list.appendChild(item);
   });
 }
 
+// debounce：流式输出期间 mutation 高频触发，合并成 300ms 一次重建
+function scheduleRebuild() {
+  clearTimeout(rebuildTimer);
+  rebuildTimer = setTimeout(buildSidebar, 300);
+}
+
 function updateActiveOnScroll() {
+  if (Date.now() < scrollLockUntil) return;
   const messages = document.querySelectorAll(config.userMessage);
   const items = document.querySelectorAll('.claude-nav-item');
   if (!messages.length || !items.length) return;
@@ -83,37 +107,52 @@ function updateActiveOnScroll() {
     const dist = Math.abs(el.getBoundingClientRect().top);
     if (dist < closestDist) { closestDist = dist; closestIndex = i; }
   });
-  items.forEach((item, i) => item.classList.toggle('active', i === closestIndex));
+  items.forEach((item, i) => {
+    const isActive = i === closestIndex;
+    item.classList.toggle('active', isActive);
+    if (isActive) activeItem = item;
+  });
 }
 
-window.addEventListener('scroll', updateActiveOnScroll, true);
+// rAF 节流：scroll 事件每秒可触发上百次，压到每帧最多一次
+window.addEventListener('scroll', () => {
+  if (scrollRafPending) return;
+  scrollRafPending = true;
+  requestAnimationFrame(() => {
+    scrollRafPending = false;
+    updateActiveOnScroll();
+  });
+}, true);
+
+function attachObserver(target) {
+  if (observer) observer.disconnect();
+  observer = new MutationObserver(scheduleRebuild);
+  observer.observe(target, { childList: true, subtree: true });
+}
 
 function init(retries = 30) {
   const container = document.querySelector(config.scrollContainer);
-  console.log('[nav] init, container:', container, 'retries:', retries);
   if (container) {
-    if (!observer) {
-      observer = new MutationObserver(() => {
-        console.log('[nav] MutationObserver fired');
-        buildSidebar();
-      });
-      observer.observe(container, { childList: true, subtree: true });
-      console.log('[nav] observer attached');
-    }
+    attachObserver(container);
     buildSidebar();
   } else if (retries > 0) {
     setTimeout(() => init(retries - 1), 300);
+  } else {
+    // 选择器失效（网站改版）时的兜底：观察 body，功能降级但不静默失败
+    console.warn('[LLM Nav] scroll container not found, falling back to body. Selectors may be outdated — please report an issue.');
+    attachObserver(document.body);
+    buildSidebar();
   }
 }
 
 setInterval(() => {
   if (location.href !== currentUrl) {
-    console.log('[nav] URL changed:', currentUrl, '->', location.href);
     currentUrl = location.href;
     const old = document.getElementById('claude-nav-sidebar');
     if (old) old.remove();
     activeItem = null;
-    observer = null;
+    if (observer) { observer.disconnect(); observer = null; } // 修复泄漏：先断开再置空
+    clearTimeout(rebuildTimer);
     init();
   }
 }, 500);

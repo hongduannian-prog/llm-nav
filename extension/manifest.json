@@ -1,11 +1,12 @@
 {
   "manifest_version": 3,
   "name": "LLM Nav",
-  "version": "1.0",
+  "version": "1.0.1",
   "content_scripts": [
     {
       "matches": [
         "https://claude.ai/*",
+        "https://chat.openai.com/*",
         "https://chatgpt.com/*",
         "https://gemini.google.com/*",
         "https://www.perplexity.ai/*"
